@@ -138,11 +138,12 @@ class AIController {
                 break;
 
             case 'punch':
-                this.keys.add(KEY.punch);
+                // Tap the key (one frame on, next off) so Character edge-detection fires.
+                if (this.frame % 8 < 4) this.keys.add(KEY.punch);
                 break;
 
             case 'kick':
-                this.keys.add(KEY.kick);
+                if (this.frame % 10 < 4) this.keys.add(KEY.kick);
                 break;
 
             case 'block':

@@ -5,6 +5,7 @@ import HealthBar from './healthBar.js';
 import AIController from './AIController.js';
 import { showMenu } from './menu.js';
 import { playHit, playBlock, playSpecial, playSuper, playAnnouncer } from './sound.js';
+import { Background } from './background.js';
 
 const canvas = document.getElementById('gameCanvas');
 const context = canvas.getContext('2d');
@@ -45,27 +46,57 @@ const game = {
     shakeTimer: 0,
     shakeMag: 0,
     hitPause: 0,                   // frames to freeze on impactful hits
-    lastTime: 0
+    lastTime: 0,
+    background: null,              // animated parallax background
+    comboEnderFlash: 0,            // timer for "COMBO ENDER!" callout
+    p1Def: null,
+    p2Def: null,
+    p1Name: 'PLAYER 1',
+    p2Name: 'PLAYER 2'
 };
 
 // ---- Match / round management ----
 
-function startMatch(mode, difficulty, level = 1) {
-    game.mode = mode;
-    game.difficulty = difficulty;
-    game.level = level;
+function startMatch(config, level = 1) {
+    if (typeof config === 'string') {
+        // Fallback for older direct calls if any exist
+        game.mode = arguments[0];
+        game.difficulty = arguments[1];
+        game.level = level;
+    } else {
+        game.mode = config.mode;
+        game.difficulty = config.difficulty;
+        game.level = config.level || level;
+        game.p1Def = config.p1Def;
+        game.p2Def = config.p2Def;
+        game.p1Name = config.p1Name;
+        game.p2Name = config.p2Name;
+    }
+
     game.round = 1;
     game.p1Wins = 0;
     game.p2Wins = 0;
     game.matchWinner = '';
-    game.healthBar1 = new HealthBar(20, 28, 380, 26, 'blue', true);
-    game.healthBar2 = new HealthBar(560, 28, 380, 26, 'red', false);
+
+    // Adjust health bar colors based on character palette if possible
+    const p1Col = game.p1Def ? game.p1Def.palette.suit : 'blue';
+    const p2Col = game.p2Def ? game.p2Def.palette.suit : 'red';
+    
+    game.healthBar1 = new HealthBar(20, 28, 380, 26, p1Col, true);
+    game.healthBar2 = new HealthBar(560, 28, 380, 26, p2Col, false);
+    
+    if (!game.background) {
+        game.background = new Background(canvas.width, canvas.height);
+    }
     startRound();
 }
 
 function startRound() {
     game.player1 = new Character(P1_START_X, START_Y, 50, 50, 'blue', true);
     game.player2 = new Character(P2_START_X, START_Y, 50, 50, 'red', false);
+    
+    if (game.p1Def) game.player1.applyFighterDef(game.p1Def);
+    if (game.p2Def) game.player2.applyFighterDef(game.p2Def);
     if (game.mode === 'ai') {
         game.ai = new AIController(game.player2, game.player1, game.difficulty);
     } else {
@@ -102,22 +133,33 @@ function startRound() {
 function endRound(winner) {
     if (winner === 'p1') {
         game.p1Wins++;
-        game.roundWinnerText = 'PLAYER 1 WINS';
+        game.roundWinnerText = game.p1Name + ' WINS';
     } else if (winner === 'p2') {
         game.p2Wins++;
-        game.roundWinnerText = (game.mode === 'ai' ? 'CPU' : 'PLAYER 2') + ' WINS';
+        game.roundWinnerText = (game.mode === 'ai' && game.p2Name === 'BOSS' ? 'CPU' : game.p2Name) + ' WINS';
     } else {
         game.roundWinnerText = 'DRAW - NO CONTEST';
     }
     game.state = 'roundOver';
-    game.roundOverTimer = ROUND_OVER_TIME;
+    game.roundOverTimer = 4.0; // 4 seconds for slow motion fall
 
-    playAnnouncer(winner !== 'draw' ? game.roundWinnerText : 'Draw');
+    if (winner !== 'draw') {
+        game.hitPause = 30; // 0.5s freeze frame on KO
+        triggerShake(25, 0.6); // Massive screen shake
+        playAnnouncer('K.O.');
+    } else {
+        playAnnouncer('Draw');
+    }
 }
 
 function checkKO() {
     const p1Dead = game.player1.health <= 0;
     const p2Dead = game.player2.health <= 0;
+    
+    // Force dead players into knockdown so they fall over instead of freezing mid-air
+    if (p1Dead && game.player1.fsm.currentState !== 'knockdown') game.player1.fsm.transition('knockdown');
+    if (p2Dead && game.player2.fsm.currentState !== 'knockdown') game.player2.fsm.transition('knockdown');
+
     if (p1Dead && p2Dead) endRound('draw');
     else if (p2Dead) endRound('p1');
     else if (p1Dead) endRound('p2');
@@ -171,6 +213,14 @@ function resolveHit(attacker, defender) {
         playSuper();
         triggerShake(20, 0.5);
         game.hitPause = 8;
+    } else if (attacker.attackData && attacker.attackData.id === 'comboKick') {
+        // 3-hit combo finisher landed!
+        attacker.flashText = 'COMBO ENDER!';
+        attacker.flashTimer = 1.4;
+        game.comboEnderFlash = 0.9;
+        playSpecial();
+        triggerShake(14, 0.4);
+        game.hitPause = 7;
     } else if (attacker.attackState === 'special') {
         attacker.flashText = 'SPECIAL!';
         attacker.flashTimer = 1.0;
@@ -214,9 +264,11 @@ function update(dt) {
         return;
     }
 
-    if (game.state === 'fighting') {
-        if (game.fightTimer > 0) game.fightTimer -= dt;
-        if (game.monsterAwakensTimer > 0) game.monsterAwakensTimer -= dt;
+    if (game.state === 'fighting' || game.state === 'roundOver') {
+        const isKO = game.state === 'roundOver';
+
+        if (!isKO && game.fightTimer > 0) game.fightTimer -= dt;
+        if (!isKO && game.monsterAwakensTimer > 0) game.monsterAwakensTimer -= dt;
 
         // Hit-pause: freeze both fighters briefly for impact "juice".
         if (game.hitPause > 0) {
@@ -224,21 +276,57 @@ function update(dt) {
             return;
         }
 
-        // Round timer.
-        game.roundTimer -= dt;
-        if (game.roundTimer <= 0) {
-            game.roundTimer = 0;
-            endRoundByTimeout();
-            return;
+        let simDt = dt;
+        if (isKO) {
+            // Slow motion during KO fall!
+            simDt *= 0.3;
+            game.roundOverTimer -= dt;
+            if (game.roundOverTimer <= 0) {
+                // Proceed to next round or match over
+                if (game.p1Wins >= WINS_NEEDED || game.p2Wins >= WINS_NEEDED) {
+                    if (game.mode === 'ai' && game.p1Wins >= WINS_NEEDED) {
+                        if (game.level < 3) {
+                            game.level++;
+                            const nextDifficulty = game.level === 2 ? 'medium' : 'hard';
+                            startMatch('ai', nextDifficulty, game.level);
+                            return;
+                        } else {
+                            game.state = 'matchOver';
+                            game.matchWinner = 'YOU WIN THE GAME!';
+                            playAnnouncer('You win the game!');
+                            return;
+                        }
+                    }
+
+                    game.state = 'matchOver';
+                    game.matchWinner = game.p1Wins >= WINS_NEEDED
+                        ? game.p1Name
+                        : (game.mode === 'ai' && game.p2Name === 'BOSS' ? 'CPU' : game.p2Name);
+                    playAnnouncer(game.matchWinner + ' Wins.');
+                } else {
+                    game.round++;
+                    startRound();
+                }
+                return;
+            }
+        } else {
+            // Round timer.
+            game.roundTimer -= dt;
+            if (game.roundTimer <= 0) {
+                game.roundTimer = 0;
+                endRoundByTimeout();
+                return;
+            }
         }
 
         // Input: AI drives Player 2 in single-player mode.
         let p2keys = player2Keys;
-        if (game.mode === 'ai') p2keys = game.ai.update(dt);
+        if (!isKO && game.mode === 'ai') p2keys = game.ai.update(simDt);
+        let p1keys = isKO ? new Set() : player1Keys;
+        if (isKO) p2keys = new Set();
 
-        // Tekken-style: Characters ALWAYS face each other - must run BEFORE update()
-        // so spawnHitbox() uses the correct facing when attacks are active.
-        if (game.player1 && game.player2) {
+        // Tekken-style: Characters ALWAYS face each other
+        if (!isKO && game.player1 && game.player2) {
             if (game.player1.x + game.player1.width / 2 < game.player2.x + game.player2.width / 2) {
                 game.player1.facing = 'right';
                 game.player2.facing = 'left';
@@ -248,45 +336,14 @@ function update(dt) {
             }
         }
 
-        game.player1.update(dt, player1Keys);
-        game.player2.update(dt, p2keys);
+        game.player1.update(simDt, p1keys);
+        game.player2.update(simDt, p2keys);
 
-        resolveHits();
-
-        game.player1.updateProjectiles(dt, game.player2);
-        game.player2.updateProjectiles(dt, game.player1);
-
-        checkKO();
-        return;
-    }
-
-    if (game.state === 'roundOver') {
-        game.roundOverTimer -= dt;
-        if (game.roundOverTimer <= 0) {
-            if (game.p1Wins >= WINS_NEEDED || game.p2Wins >= WINS_NEEDED) {
-                if (game.mode === 'ai' && game.p1Wins >= WINS_NEEDED) {
-                    if (game.level < 3) {
-                        game.level++;
-                        const nextDifficulty = game.level === 2 ? 'medium' : 'hard';
-                        startMatch('ai', nextDifficulty, game.level);
-                        return;
-                    } else {
-                        game.state = 'matchOver';
-                        game.matchWinner = 'YOU WIN THE GAME!';
-                        playAnnouncer('You win the game!');
-                        return;
-                    }
-                }
-
-                game.state = 'matchOver';
-                game.matchWinner = game.p1Wins >= WINS_NEEDED
-                    ? 'PLAYER 1'
-                    : (game.mode === 'ai' ? 'CPU' : 'PLAYER 2');
-                playAnnouncer(game.matchWinner + ' Wins.');
-            } else {
-                game.round++;
-                startRound();
-            }
+        if (!isKO) {
+            resolveHits();
+            game.player1.updateProjectiles(simDt, game.player2);
+            game.player2.updateProjectiles(simDt, game.player1);
+            checkKO();
         }
         return;
     }
@@ -343,9 +400,9 @@ function renderHUD() {
     context.fillStyle = '#fff';
     context.font = 'bold 16px Arial';
     context.textAlign = 'left';
-    context.fillText(game.mode === 'ai' ? 'PLAYER 1' : 'PLAYER 1', 20, 20);
+    context.fillText(game.p1Name, 20, 20);
     context.textAlign = 'right';
-    context.fillText(game.mode === 'ai' ? `CPU (Level ${game.level})` : 'PLAYER 2', 940, 20);
+    context.fillText(game.mode === 'ai' ? `${game.p2Name} (Lvl ${game.level})` : game.p2Name, 940, 20);
 
     // Health bars
     game.healthBar1.render(context, game.player1.health, game.player1.maxHealth);
@@ -422,12 +479,34 @@ function renderAnnouncements() {
             context.restore();
         }
     } else if (game.state === 'roundOver') {
-        context.fillStyle = '#fff';
-        context.font = 'bold 46px Arial';
-        context.fillText(`ROUND ${game.round}`, 480, 200);
-        context.fillStyle = '#ffcc00';
-        context.font = 'bold 50px Arial';
-        context.fillText(game.roundWinnerText, 480, 260);
+        if (game.roundOverTimer > 2.5) {
+            // Massive K.O. block
+            context.font = 'italic 900 130px Orbitron, sans-serif';
+            context.fillStyle = '#ff1100';
+            context.strokeStyle = 'black';
+            context.shadowColor = '#ff6600';
+            context.shadowBlur = 40;
+            context.lineWidth = 14;
+            const text = game.roundWinnerText === 'DRAW - NO CONTEST' ? 'DOUBLE K.O.' : 'K.O.';
+            context.strokeText(text, 480, 280);
+            context.fillText(text, 480, 280);
+            context.shadowBlur = 0;
+        } else {
+            // Post-KO Winner text
+            context.fillStyle = '#fff';
+            context.font = 'bold 46px Arial';
+            context.fillText(`ROUND ${game.round}`, 480, 200);
+            context.fillStyle = '#ffcc00';
+            context.font = 'italic 900 68px Orbitron, Arial';
+            context.fillText(game.roundWinnerText, 480, 280);
+        }
+
+        // Cinematic fade to black over the last half second
+        if (game.roundOverTimer < 0.5) {
+            const alpha = 1.0 - (game.roundOverTimer * 2);
+            context.fillStyle = `rgba(0,0,0,${alpha})`;
+            context.fillRect(0, 0, 960, 540);
+        }
     } else if (game.state === 'matchOver') {
         context.fillStyle = '#ffcc00';
         context.font = 'bold 60px Arial';
@@ -448,6 +527,14 @@ function render(dt) {
         return; // menu overlay handles visuals
     }
 
+    // ---- Animated background (drawn outside shake transform) ----
+    if (game.background) {
+        const p1cx = game.player1.x + game.player1.width / 2;
+        const p2cx = game.player2.x + game.player2.width / 2;
+        game.background.update(dt, p1cx, p2cx);
+        game.background.draw(context);
+    }
+
     context.save();
 
     // Screen shake (brief canvas translate offset).
@@ -458,10 +545,6 @@ function render(dt) {
         game.shakeTimer -= dt;
         if (game.shakeTimer < 0) game.shakeTimer = 0;
     }
-
-    // Ground line
-    context.fillStyle = '#4a4a4a';
-    context.fillRect(0, GROUND_Y, canvas.width, 2);
 
     // HUD
     renderHUD();
@@ -477,20 +560,43 @@ function render(dt) {
         context.fillRect(-30, -30, canvas.width + 60, canvas.height + 60);
     }
 
-    // "SPECIAL!" / "SUPER!" callout
+    // "SPECIAL!" / "SUPER!" / "COMBO ENDER!" callout
     const flashing = game.player1.flashTimer > 0 ? game.player1
         : (game.player2.flashTimer > 0 ? game.player2 : null);
     if (flashing) {
+        const isComboEnder = flashing.flashText === 'COMBO ENDER!';
         context.save();
         context.textAlign = 'center';
-        context.font = 'bold 52px Arial';
-        context.fillStyle = flashing.isSuperMove ? 'cyan' : '#ffcc00';
-        context.strokeStyle = 'black';
-        context.lineWidth = 4;
-        context.strokeText(flashing.flashText, 480, 180);
-        context.fillText(flashing.flashText, 480, 180);
+        if (isComboEnder) {
+            const pulse = 1 + Math.sin(performance.now() / 80) * 0.06;
+            context.translate(480, 180);
+            context.scale(pulse, pulse);
+            context.font = 'bold 58px Orbitron, Arial';
+            context.strokeStyle = '#330000';
+            context.lineWidth = 6;
+            context.shadowColor = '#ff6600';
+            context.shadowBlur = 22;
+            const grad = context.createLinearGradient(-150, -30, 150, 30);
+            grad.addColorStop(0,   '#ff6600');
+            grad.addColorStop(0.5, '#ffcc00');
+            grad.addColorStop(1,   '#ff3300');
+            context.fillStyle = grad;
+            context.strokeText(flashing.flashText, 0, 0);
+            context.fillText(flashing.flashText, 0, 0);
+            context.shadowBlur = 0;
+        } else {
+            context.font = 'bold 52px Arial';
+            context.fillStyle = flashing.isSuperMove ? 'cyan' : '#ffcc00';
+            context.strokeStyle = 'black';
+            context.lineWidth = 4;
+            context.strokeText(flashing.flashText, 480, 180);
+            context.fillText(flashing.flashText, 480, 180);
+        }
         context.restore();
     }
+
+    // Tick down the combo ender flash timer
+    if (game.comboEnderFlash > 0) game.comboEnderFlash -= dt;
 
     context.restore();
 

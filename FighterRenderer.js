@@ -250,6 +250,29 @@ function buildPose(fighter) {
                 pose.rUpperLeg = -0.8;
                 pose.lUpperLeg = 0.4;
                 break;
+            // ---- 3-hit Combo String poses ----
+            case 'comboJab':
+                // Quick left-hand lead jab
+                pose.lUpperArm = lerp(0.3, -1.55, ext);
+                pose.lForeArm  = lerp(0.4, -0.1, ext);
+                pose.rUpperArm = lerp(-0.3, 0.2, ext);
+                break;
+            case 'comboCross':
+                // Right-hand body blow — step in, slight lean
+                pose.bodyLean  = ext * 0.18;
+                pose.rUpperArm = lerp(-0.2, -1.6, ext);
+                pose.rForeArm  = lerp(-0.3, 0.15, ext);
+                pose.lUpperArm = lerp(0.3, 0.9, ext);
+                pose.bodyY     = ext * 4;
+                break;
+            case 'comboKick':
+                // Rising kick finisher
+                pose.bodyLean  = -ext * 0.1;
+                pose.rUpperLeg = lerp(-0.05, -1.8, ext);
+                pose.rLowerLeg = lerp(-0.1, 0.4, ext);
+                pose.lUpperArm = lerp(-0.3, -1.1, ext);
+                pose.rUpperArm = lerp(0.5,  1.0, ext);
+                break;
             default:
                 break;
         }
@@ -265,9 +288,9 @@ function jointFromAngle(originX, originY, length, angle) {
     };
 }
 
-function drawFighterBody(ctx, pose, palette, facing, monsterLevel) {
+function drawFighterBody(ctx, pose, palette, facing, monsterLevel, customScale = 1.0) {
     const { skin, suit, suitDark, outline, hair, glove } = palette;
-    const scale = monsterLevel === 2 ? 1.2 : (monsterLevel === 1 ? 1.1 : 1.0);
+    const scale = customScale * (monsterLevel === 2 ? 1.2 : (monsterLevel === 1 ? 1.1 : 1.0));
     const hipY = (-38 + pose.bodyY) * scale;
     const shoulderY = (-62 + pose.bodyY) * scale;
     const neckY = (-72 + pose.bodyY) * scale;
@@ -369,14 +392,18 @@ function drawProjectile(ctx, p, isSuper) {
 function getPalette(fighter) {
     const ml = fighter.monsterLevel || 0;
 
-    if (fighter.isPlayer1) {
-        return { suit: '#1e5bb8', suitDark: '#123d7a', skin: '#d4a574', hair: '#1a1008', glove: '#2244aa', outline: '#0a2040' };
-    }
-
     if (fighter.isHit) {
         if (ml === 2) return { suit: '#ff6600', suitDark: '#cc3300', skin: '#ff9900', hair: '#ffffff', glove: '#ff4400', outline: '#880000' };
         if (ml === 1) return { suit: '#88ff00', suitDark: '#44aa00', skin: '#ccff44', hair: '#ffffff', glove: '#66ee00', outline: '#114400' };
         return { suit: '#ffffff', suitDark: '#dddddd', skin: '#ffffff', hair: '#aaaaaa', glove: '#cccccc', outline: '#888888' };
+    }
+
+    if (fighter.customPalette && ml === 0) {
+        return fighter.customPalette;
+    }
+
+    if (fighter.isPlayer1) {
+        return { suit: '#1e5bb8', suitDark: '#123d7a', skin: '#d4a574', hair: '#1a1008', glove: '#2244aa', outline: '#0a2040' };
     }
 
     if (ml === 2) {
@@ -410,7 +437,7 @@ export function renderFighter(ctx, fighter) {
         drawKnockdown(ctx, palette, palette.outline);
     } else {
         if (pose.airborne) ctx.translate(0, -8);
-        drawFighterBody(ctx, pose, palette, dir, ml);
+        drawFighterBody(ctx, pose, palette, dir, ml, fighter.bodyScale);
     }
 
     // Invulnerability shield

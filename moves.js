@@ -57,6 +57,45 @@ const crouchPunch = makeMelee('crouchPunch', 'Body Blow', 'hand', {
 const punchAttack = jab;
 const kickAttack = highKick;
 
+// ---------------------------------------------------------------
+// Combo String — Punch → Punch → Kick  (Tekken 3-hit natural combo)
+// Each hit has a unique ID so FighterRenderer can pose it differently.
+// ---------------------------------------------------------------
+
+// Hit 1: quick straight jab
+const comboJab = makeMelee('comboJab', 'Combo Jab', 'hand', {
+    startup: 4, active: 3, recovery: 10, damage: 6,
+    hitboxOffset: { x: 44, y: -58 }, hitboxSize: { width: 24, height: 14 }
+});
+
+// Hit 2: body cross — slightly slower, body-level
+const comboCross = makeMelee('comboCross', 'Combo Cross', 'hand', {
+    startup: 6, active: 4, recovery: 12, damage: 10,
+    hitboxOffset: { x: 48, y: -50 }, hitboxSize: { width: 30, height: 18 }
+});
+
+// Hit 3 (FINISHER): rising kick — bigger hitbox, launcher knockback
+const comboKick = makeMelee('comboKick', 'Combo Kick', 'foot', {
+    startup: 10, active: 6, recovery: 18, damage: 16,
+    hitboxOffset: { x: 44, y: -62 }, hitboxSize: { width: 38, height: 26 },
+    knockback: 1.3
+});
+
+// How long (seconds) after a combo hit fires that the next press is still valid
+export const COMBO_LINK_WINDOW = 0.45;
+
+/**
+ * Returns the move for the given step in the 3-hit natural combo string.
+ *   step 0 → comboJab   (first Punch)
+ *   step 1 → comboCross (second Punch)
+ *   step 2 → comboKick  (Kick finisher)
+ */
+export function pickComboMove(step) {
+    if (step === 1) return comboCross;
+    if (step === 2) return comboKick;
+    return comboJab;
+}
+
 // ---- Special moves ----
 const fireball = {
     id: 'fireball',
@@ -110,6 +149,38 @@ const spinningKick = {
     invulnerableStartup: false
 };
 
+const bladeDash = {
+    id: 'bladeDash',
+    name: 'Blade Dash',
+    pattern: ['down', 'down-back', 'back', 'punch'], // Quarter-circle back + punch
+    type: 'melee',
+    limb: 'hand',
+    startup: 8,
+    active: 14,
+    recovery: 30,
+    damage: 18,
+    hitboxOffset: { x: 30, y: -55 },
+    hitboxSize: { width: 60, height: 20 }, // horizontal piercing hitbox
+    invulnerableStartup: false,
+    dashForce: 600 // We can handle this velocity in Character.js or it just hits far
+};
+
+const flyingKnee = {
+    id: 'flyingKnee',
+    name: 'Flying Knee',
+    pattern: ['down', 'down-forward', 'forward', 'kick'], // Quarter-circle forward + kick
+    type: 'melee',
+    limb: 'foot',
+    startup: 6,
+    active: 12,
+    recovery: 22,
+    damage: 16,
+    hitboxOffset: { x: 25, y: -70 },
+    hitboxSize: { width: 35, height: 50 },
+    invulnerableStartup: true, // Beats attacks cleanly
+    invulnFrames: 6
+};
+
 const superMove = {
     id: 'super',
     name: 'Rage Drive',
@@ -126,7 +197,23 @@ const superMove = {
     knockback: 1.8
 };
 
-const specialMoves = [fireball, uppercut, spinningKick];
+const earthquakeSmash = {
+    id: 'earthquakeSmash',
+    name: 'Earthquake Smash',
+    pattern: ['down', 'down-back', 'back', 'punch'],
+    type: 'melee',
+    limb: 'hand',
+    startup: 16, // Slow startup
+    active: 8,
+    recovery: 28,
+    damage: 28,
+    hitboxOffset: { x: 35, y: -20 },
+    hitboxSize: { width: 45, height: 45 },
+    invulnerableStartup: false,
+    knockback: 1.6
+};
+
+const specialMoves = [fireball, uppercut, spinningKick, bladeDash, flyingKnee, earthquakeSmash];
 
 // Context-based normal move selection
 export function pickNormalMove(context) {
@@ -142,20 +229,15 @@ export function pickNormalMove(context) {
     return highKick;
 }
 
-// Chain: jab -> cross -> hook (Tekken-style string on repeated punches)
-export function pickComboMove(comboStep) {
-    if (comboStep === 1) return cross;
-    if (comboStep === 2) return hook;
-    return jab;
-}
-
 export {
     jab, cross, hook, highKick, lowKick, jumpKick, crouchPunch,
-    punchAttack, kickAttack, fireball, uppercut, spinningKick,
+    comboJab, comboCross, comboKick,
+    punchAttack, kickAttack, fireball, uppercut, spinningKick, bladeDash, flyingKnee, earthquakeSmash,
     superMove, specialMoves
 };
 
 export default {
     jab, cross, hook, highKick, lowKick, jumpKick, crouchPunch,
-    fireball, uppercut, spinningKick, superMove
+    comboJab, comboCross, comboKick,
+    fireball, uppercut, spinningKick, bladeDash, flyingKnee, earthquakeSmash, superMove
 };

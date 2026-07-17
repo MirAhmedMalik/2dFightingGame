@@ -1,6 +1,6 @@
 import FiniteStateMachine from './stateMachine.js';
 import { rectsOverlap } from './collision.js';
-import { punchAttack, kickAttack, specialMoves, superMove, pickNormalMove } from './moves.js';
+import { punchAttack, kickAttack, specialMoves, superMove, pickNormalMove, pickComboMove, COMBO_LINK_WINDOW } from './moves.js';
 import { player1Buffer, player2Buffer, updateBuffer, matchSpecialMove } from './input.js';
 import { PLAYER1_KEYS, PLAYER2_KEYS } from './playerKeys.js';
 import { renderFighter } from './FighterRenderer.js';
@@ -34,11 +34,19 @@ class Character {
         this.hitFlashTimer = 0;
         this.isHit = false;
 
+        // Fighter definitions
+        this.fighterDefId = null;
+        this.customPalette = null;
+        this.bodyScale = 1.0;
+        this.moveSpeed = MOVE_SPEED;
+        this.meterGainMultiplier = 1.0;
+        this.specials = specialMoves;
+
         // Blocking state
         this.blocking = false;
         this.blockstunTimer = 0;
 
-        // Combo tracking
+        // Combo tracking (display hit counter)
         this.comboCounter = 0;
         this.comboDamage = 0;
         this.lastAttacker = null;
@@ -53,7 +61,20 @@ class Character {
         this.attackFrame = 0;
         this.attackData = null;
         this.hitbox = null;
-        this.hasHitThisAttack = false; // Track if this attack already hit
+        this.hasHitThisAttack = false;
+
+        // ---- Combo String state ----
+        // step 0 = first hit (comboJab),  via tryInitiateAttack
+        // step 1 = second hit (comboCross), chained from step 0 recovery
+        // step 2 = finisher  (comboKick),  chained from step 1 recovery
+        this.comboStep = 0;           // which combo hit is current / next
+        this.comboLinkTimer = 0;      // time remaining to accept the next button press
+        this.pendingComboInput = null; // 'punch' | 'kick' — buffered during combo recovery
+        this.inComboString = false;   // true while executing the 3-hit chain
+
+        // Edge-detection for combo input (prevents key-hold from auto-chaining)
+        this.prevPunchKey = false;
+        this.prevKickKey  = false;
 
         // Special / super move state
         this.specialMoveData = null;
@@ -92,19 +113,19 @@ class Character {
                     } else if (self.keys.has(self.bindings.down)) {
                         self.fsm.transition('crouching');
                     } else if (self.tryInitiateAttack()) {
-                        // special / super / normal attack initiated
+                        // special / super / normal / combo attack initiated
                     } else if (self.keys.has(self.bindings.block)) {
                         self.fsm.transition('blocking');
                     }
                 },
-                allowedTransitions: ['walking', 'jumping', 'crouching', 'attacking', 'blocking', 'specialAttack']
+                allowedTransitions: ['walking', 'jumping', 'crouching', 'attacking', 'blocking', 'specialAttack', 'comboString']
             },
             walking: {
                 onUpdate: (dt) => {
                     if (self.keys.has(self.bindings.left)) {
-                        self.velocity.x = -MOVE_SPEED;
+                        self.velocity.x = -self.moveSpeed;
                     } else if (self.keys.has(self.bindings.right)) {
-                        self.velocity.x = MOVE_SPEED;
+                        self.velocity.x = self.moveSpeed;
                     } else {
                         self.fsm.transition('idle');
                         return;
@@ -115,7 +136,7 @@ class Character {
                     } else if (self.keys.has(self.bindings.down)) {
                         self.fsm.transition('crouching');
                     } else if (self.tryInitiateAttack()) {
-                        // special / super / normal attack initiated
+                        // special / super / normal / combo attack initiated
                     } else if (self.keys.has(self.bindings.block)) {
                         self.fsm.transition('blocking');
                     }
@@ -123,7 +144,7 @@ class Character {
                 onExit: () => {
                     self.velocity.x = 0;
                 },
-                allowedTransitions: ['idle', 'jumping', 'crouching', 'attacking', 'blocking', 'specialAttack']
+                allowedTransitions: ['idle', 'jumping', 'crouching', 'attacking', 'blocking', 'specialAttack', 'comboString']
             },
             jumping: {
                 onEnter: () => {
@@ -177,7 +198,6 @@ class Character {
                     self.velocity.x = 0;
                 },
                 onUpdate: (dt) => {
-                    // Stay in block if key held, else return to idle
                     if (!self.keys.has(self.bindings.block)) {
                         self.fsm.transition('idle');
                     }
@@ -199,6 +219,26 @@ class Character {
                 },
                 allowedTransitions: ['idle', 'walking', 'jumping', 'crouching', 'hitstun', 'blockstun', 'knockdown', 'specialAttack']
             },
+            // ----------------------------------------------------------------
+            // comboString — plays 3-hit natural combo (Punch→Punch→Kick)
+            // ----------------------------------------------------------------
+            comboString: {
+                onEnter: () => {
+                    self.velocity.x = 0;
+                    // The attackData / attackFrame / etc. are already set by startComboHit()
+                    // before the transition, so nothing extra needed here.
+                },
+                onUpdate: (dt) => {
+                    self.updateComboAttack(dt);
+                },
+                onExit: () => {
+                    self.resetAttackState();
+                    self.inComboString = false;
+                    self.comboLinkTimer = 0;
+                    self.pendingComboInput = null;
+                },
+                allowedTransitions: ['idle', 'walking', 'crouching', 'jumping', 'hitstun', 'blockstun', 'knockdown', 'comboString']
+            },
             specialAttack: {
                 onEnter: () => {
                     self.velocity.x = 0;
@@ -217,7 +257,7 @@ class Character {
                     self.velocity.y = 0;
                 },
                 onUpdate: (dt) => {
-                    self.hitstunTimer -= dt * 60; // Convert to frames
+                    self.hitstunTimer -= dt * 60;
                     self.hitFlashTimer -= dt;
 
                     if (self.hitFlashTimer <= 0) {
@@ -244,7 +284,7 @@ class Character {
                     self.velocity.y = 0;
                 },
                 onUpdate: (dt) => {
-                    self.blockstunTimer -= dt * 60; // Convert to frames
+                    self.blockstunTimer -= dt * 60;
                     if (self.blockstunTimer <= 0) {
                         self.fsm.transition('idle');
                     }
@@ -270,6 +310,117 @@ class Character {
         }, 'idle');
     }
 
+    // ----------------------------------------------------------------
+    // Combo string helpers
+    // ----------------------------------------------------------------
+
+    /**
+     * Starts one hit of the 3-hit combo chain.
+     * step 0 = comboJab, 1 = comboCross, 2 = comboKick (finisher)
+     */
+    startComboHit(step) {
+        this.comboStep      = step;
+        this.attackState    = step === 2 ? 'heavy' : 'light';
+        this.attackFrame    = 0;
+        this.attackData     = pickComboMove(step);
+        this.hasHitThisAttack = false;
+        this.swooshPlayed   = false;
+        this.inComboString  = true;
+        this.comboLinkTimer = 0;       // reset; link window opens during recovery
+        this.pendingComboInput = null;
+    }
+
+    /**
+     * Called by the comboString FSM state's onUpdate each frame.
+     * Drives the attack animation, opens a link window during recovery,
+     * and either chains to the next hit or exits the combo.
+     */
+    updateComboAttack(dt) {
+        if (!this.attackData) return;
+
+        if (!this.swooshPlayed && this.attackData.type === 'melee') {
+            playSwoosh(this.comboStep === 2); // heavier swoosh on kick finisher
+            this.swooshPlayed = true;
+        }
+
+        const frameTime = 1 / 60;
+        this.attackFrame += dt / frameTime;
+
+        const { startup, active, recovery } = this.attackData;
+        const totalFrames = startup + active + recovery;
+
+        // Hitbox during active window
+        if (this.attackFrame > startup && this.attackFrame <= startup + active) {
+            this.spawnHitbox();
+        } else {
+            this.hitbox = null;
+        }
+
+        // ----- During recovery: open the link window -----
+        const recoveryStart = startup + active;
+        if (this.attackFrame > recoveryStart) {
+            // Count down the link window on the first recovery frame
+            if (this.comboLinkTimer === 0) {
+                this.comboLinkTimer = COMBO_LINK_WINDOW;
+            }
+            this.comboLinkTimer -= dt;
+
+            // Edge-detect button presses and buffer them
+            const punchNow = this.keys.has(this.bindings.punch);
+            const kickNow  = this.keys.has(this.bindings.kick);
+
+            if (punchNow && !this.prevPunchKey && this.pendingComboInput === null) {
+                this.pendingComboInput = 'punch';
+            }
+            if (kickNow && !this.prevKickKey && this.pendingComboInput === null) {
+                this.pendingComboInput = 'kick';
+            }
+        }
+
+        // ----- Attack animation done -----
+        if (this.attackFrame >= totalFrames) {
+            const nextStep = this.comboStep + 1;
+            const validLink = this.pendingComboInput !== null && this.comboLinkTimer > 0;
+            const wantsNextPunch = this.pendingComboInput === 'punch' && nextStep === 1;
+            const wantsKickFinish = this.pendingComboInput === 'kick' && nextStep === 2;
+
+            if (validLink && (wantsNextPunch || wantsKickFinish) && nextStep <= 2) {
+                // Chain to next hit — stay in comboString, just reset move data in-place.
+                // Do NOT call fsm.transition('comboString') — that fires onExit which
+                // calls resetAttackState() and wipes the attackData we're about to set.
+                this.pendingComboInput = null;
+                this.comboLinkTimer = 0;
+                this.startComboHit(nextStep);
+                // velocity stop so each hit is crisp
+                this.velocity.x = 0;
+            } else {
+                // Combo ended (no link, wrong button, or finisher complete)
+                this.inComboString = false;
+                if (this.onGround) {
+                    if (this.keys.has(this.bindings.left) || this.keys.has(this.bindings.right)) {
+                        this.fsm.transition('walking');
+                    } else {
+                        this.fsm.transition('idle');
+                    }
+                } else {
+                    this.fsm.transition('jumping');
+                }
+            }
+        }
+    }
+
+    /**
+     * Partial reset used when chaining combo hits within the same comboString state.
+     * Does NOT clear inComboString or comboStep (those are set by startComboHit).
+     */
+    resetAttackStatePartial() {
+        this.hitbox = null;
+        this.hasHitThisAttack = false;
+        this.projectileSpawned = false;
+        this.swooshPlayed = false;
+        this.isInvulnerable = false;
+    }
+
     attack(type) {
         // Can only attack from idle, walking, jumping, or crouching
         const allowedStates = ['idle', 'walking', 'jumping', 'crouching'];
@@ -293,7 +444,7 @@ class Character {
     // current input. Returns true if an attack was initiated.
     tryInitiateAttack() {
         const punchKey = this.bindings.punch;
-        const kickKey = this.bindings.kick;
+        const kickKey  = this.bindings.kick;
         const superKey = this.bindings.super;
 
         // Super move (edge-triggered, requires full meter)
@@ -304,7 +455,20 @@ class Character {
             return true;
         }
 
-        // Normal / special attack
+        // Edge-detect punch / kick for combo and normal initiations
+        const punchPressed = this.keys.has(punchKey) && !this.prevPunchKey;
+        const kickPressed  = this.keys.has(kickKey)  && !this.prevKickKey;
+
+        // --- Combo string start: standing Punch (not crouching, not airborne) ---
+        if (punchPressed && this.onGround && !this.isCrouching) {
+            if (this.trySpecialMove()) return true;
+            // Start combo string at step 0
+            this.startComboHit(0);
+            this.fsm.transition('comboString');
+            return true;
+        }
+
+        // Normal / special attack (crouching, air, or kick on ground)
         if (this.keys.has(punchKey) || this.keys.has(kickKey)) {
             if (this.trySpecialMove()) return true;
             const attackType = this.keys.has(punchKey) ? 'punch' : 'kick';
@@ -319,13 +483,25 @@ class Character {
         const allowedStates = ['idle', 'walking', 'crouching', 'jumping'];
         if (!allowedStates.includes(this.fsm.currentState)) return false;
 
-        for (const move of specialMoves) {
+        for (const move of this.specials) {
             if (matchSpecialMove(this.buffer, move.pattern)) {
                 this.startSpecialMove(move);
                 return true;
             }
         }
         return false;
+    }
+
+    applyFighterDef(def) {
+        if (!def) return;
+        this.fighterDefId = def.id;
+        this.maxHealth = def.stats.maxHealth;
+        this.health = def.stats.maxHealth;
+        this.moveSpeed = def.stats.speed;
+        this.meterGainMultiplier = def.stats.meterGain;
+        this.specials = def.specials || specialMoves;
+        this.customPalette = def.palette;
+        this.bodyScale = def.scale || 1.0;
     }
 
     startSpecialMove(move) {
@@ -342,7 +518,7 @@ class Character {
         this.projectileSpawned = false;
         this.swooshPlayed = false;
         this.isInvulnerable = false;
-        this.buffer.length = 0; // clear so the motion can't re-trigger
+        this.buffer.length = 0;
         this.fsm.transition('specialAttack');
     }
 
@@ -360,8 +536,8 @@ class Character {
         this.projectileSpawned = false;
         this.swooshPlayed = false;
         this.isInvulnerable = false;
-        this.superMeter = 0; // consume all meter
-        this.superFlashTimer = 0.4; // dramatic screen flash
+        this.superMeter = 0;
+        this.superFlashTimer = 0.4;
         this.buffer.length = 0;
         this.fsm.transition('specialAttack');
     }
@@ -396,7 +572,7 @@ class Character {
             if (!p.hit && opponent && !opponent.isInvulnerable &&
                 rectsOverlap(p, opponent.getHurtbox())) {
                 opponent.takeHit(p.damage, p.vx > 0 ? 1 : -1, this, false);
-                this.superMeter = Math.min(100, this.superMeter + 5); // landed a hit
+                this.superMeter = Math.min(100, this.superMeter + (5 * this.meterGainMultiplier));
                 this.flashText = 'SPECIAL!';
                 this.flashTimer = 1.0;
                 this.projectiles.splice(i, 1);
@@ -446,7 +622,6 @@ class Character {
         }
 
         if (this.attackData.type === 'projectile') {
-            // Fire projectile once during the active window
             if (this.attackFrame > startup && this.attackFrame <= startup + active) {
                 if (!this.projectileSpawned) {
                     this.spawnProjectile();
@@ -455,7 +630,6 @@ class Character {
             }
             this.hitbox = null;
         } else {
-            // Melee: spawn hitbox during active frames
             if (this.attackFrame > startup && this.attackFrame <= startup + active) {
                 this.spawnHitbox();
             } else {
@@ -463,7 +637,6 @@ class Character {
             }
         }
 
-        // Check if attack is done
         if (this.attackFrame >= totalFrames) {
             if (this.onGround) {
                 if (this.keys.has(this.bindings.left) || this.keys.has(this.bindings.right)) {
@@ -479,8 +652,6 @@ class Character {
 
     spawnHitbox() {
         const { hitboxOffset, hitboxSize } = this.attackData;
-        // Offsets in moves.js are measured UP from the feet (y+height), not from top-left.
-        // Negative y = upward from ground level.
         const feetX = this.x + this.width / 2;
         const feetY = this.y + this.height;
         const offsetX = this.facing === 'right'
@@ -496,8 +667,6 @@ class Character {
     }
 
     getHurtbox() {
-        // The procedural humanoid renderer is ~90px tall standing, ~55px crouching.
-        // Expand hurtbox to cover the actual visual body from feet upward.
         const feetY = this.y + this.height;
         const bodyH = this.isCrouching ? 55 : 90;
         return {
@@ -509,69 +678,75 @@ class Character {
     }
 
     takeHit(damage, knockbackDirection, attacker = null, isHeavy = false) {
-        // If already in knockdown, ignore further hits (invulnerable)
         if (this.fsm.currentState === 'knockdown') return;
-        // Invulnerable during special-move startup (e.g. uppercut / super)
         if (this.isInvulnerable) return;
 
-        // Build super meter: +2 when taking a hit
-        this.superMeter = Math.min(100, this.superMeter + 2);
+        this.superMeter = Math.min(100, this.superMeter + (2 * this.meterGainMultiplier));
 
-        // Blocking: reduce damage to 10% and apply minimal knockback (blockstun)
         if (this.blocking && this.fsm.currentState === 'blocking') {
             const blockedDamage = damage * 0.1;
             this.health = Math.max(0, this.health - blockedDamage);
-            this.blockstunTimer = 8; // Short blockstun (~8 frames)
+            this.blockstunTimer = 8;
             this.hitFlashTimer = 0.05;
             this.isHit = true;
-
-            // Minimal knockback
             this.velocity.x = knockbackDirection * 50;
             this.velocity.y = 0;
-
             this.fsm.transition('blockstun');
             return;
         }
 
-        // Already in hitstun from this attacker -> combo continues
         const inCombo = (this.fsm.currentState === 'hitstun' || this.fsm.currentState === 'blockstun') && this.lastAttacker === attacker;
 
         if (inCombo) {
             this.comboCounter++;
         } else {
-            // New combo: reset counter and damage
             this.comboCounter = 1;
             this.comboDamage = 0;
         }
 
         this.lastAttacker = attacker;
 
-        // Damage scaling: each hit after the 1st deals (damage * 0.85^comboCount)
         const scaledDamage = damage * Math.pow(0.85, this.comboCounter - 1);
         this.comboDamage += scaledDamage;
 
         this.health = Math.max(0, this.health - scaledDamage);
-        this.hitstunFrames = scaledDamage * 2; // hitstun frames = damage * 2
+        this.hitstunFrames = scaledDamage * 2;
         this.hitstunTimer = this.hitstunFrames;
-        this.hitFlashTimer = 0.1; // Flash for 100ms
+        this.hitFlashTimer = 0.1;
         this.isHit = true;
 
-        // Apply knockback impulse (physics will resolve over following frames)
         const knockbackForce = 300;
-        this.velocity.x = knockbackDirection * knockbackForce;
-        this.velocity.y = -200; // Small upward pop
 
-        // Knockdown check: cumulative combo damage > 25 OR heavy attack as finisher
-        if (this.comboDamage >= 25 || (isHeavy && this.comboCounter >= 2)) {
+        if (!this.onGround) {
+            // Juggle mechanics!
+            this.juggleHits = (this.juggleHits || 0) + 1;
+            
+            // Tekken style: each juggle decays the pop-up force so they eventually fall
+            // -350 is a solid pop. +60 per hit means gravity eventually wins (around 5-6 hits).
+            const popUp = Math.min(-100, -400 + (this.juggleHits * 60)); 
+            this.velocity.y = popUp;
+            this.velocity.x = knockbackDirection * (knockbackForce + 150);
+
+            // Juggled characters must stay in knockdown state so they fall to the floor
             if (this.fsm.currentState !== 'knockdown') {
                 this.fsm.transition('knockdown');
             }
         } else {
-            if (this.fsm.currentState !== 'hitstun') {
-                this.fsm.transition('hitstun');
+            // Ground hit
+            this.juggleHits = 0;
+            this.velocity.y = -200;
+            this.velocity.x = knockbackDirection * knockbackForce;
+
+            if (this.comboDamage >= 25 || (isHeavy && this.comboCounter >= 2)) {
+                if (this.fsm.currentState !== 'knockdown') {
+                    this.fsm.transition('knockdown');
+                }
             } else {
-                // Already in hitstun (combo) - refresh timer, keep knockback velocity
-                this.hitstunTimer = this.hitstunFrames;
+                if (this.fsm.currentState !== 'hitstun') {
+                    this.fsm.transition('hitstun');
+                } else {
+                    this.hitstunTimer = this.hitstunFrames;
+                }
             }
         }
     }
@@ -579,7 +754,7 @@ class Character {
     update(deltaTime, keys) {
         this.keys = keys;
 
-        // Sample input into the rolling buffer (one token per frame)
+        // Sample input into the rolling buffer
         updateBuffer(this.isPlayer1 ? 1 : 2, this.keys, this.facing);
 
         // Tick down on-screen effect timers
@@ -589,15 +764,20 @@ class Character {
         // Apply gravity
         this.velocity.y += GRAVITY * deltaTime;
 
-        // Apply friction to horizontal velocity (for natural knockback decay)
+        // Friction (less friction if airborne so juggled characters fly back smoothly)
         if (this.fsm.currentState === 'hitstun' || this.fsm.currentState === 'blockstun' || this.fsm.currentState === 'knockdown') {
-            this.velocity.x *= 0.9; // Friction decay
+            this.velocity.x *= this.onGround ? 0.9 : 0.96;
         }
 
-        // Update FSM (handles input and state transitions)
+        // Update FSM
         this.fsm.update(deltaTime);
 
-        // Apply velocity to position
+        // Update edge-detection state AFTER FSM so tryInitiateAttack's edge
+        // detection fires on this frame then resets for next frame.
+        this.prevPunchKey = this.keys.has(this.bindings.punch);
+        this.prevKickKey  = this.keys.has(this.bindings.kick);
+
+        // Apply velocity
         this.x += this.velocity.x * deltaTime;
         this.y += this.velocity.y * deltaTime;
 
@@ -607,6 +787,7 @@ class Character {
             this.y = floorY;
             this.velocity.y = 0;
             this.onGround = true;
+            this.juggleHits = 0; // Reset juggle counter upon landing
         } else {
             this.onGround = false;
         }
